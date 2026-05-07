@@ -1358,3 +1358,1761 @@ collection_name = "rag"
 persist_directory = "./chroma_db"
 2）问答链通过 session_id 绑定历史
 app_qa.py 在调用 chain 时传入 config.session_config，其中 session_id 固定为 "user_001"；rag.py 再借助 RunnableWithMessageHistory 调用 get_history(session_id) 实现多轮对话记忆。
+
+大模型无法感知或改变外部环境，所以我们可以将大模型和一些工具（如文件读写工具、运行终端命令工具）组装在一起，变成一个能感知并改变外部环境的智能程序，这就是Agent。
+
+注意，大模型本身不能调用工具，调用工具的是agent的工具调用组件，大模型只能请求调用工具。
+
+Agent类型多，擅长领域各不相同，如cursor就是一个用于编程的agent。
+
+from langchain.agents import create_agent
+from langchain_community.chat_models.tongyi import ChatTongyi
+from langchain_core.tools import tool
+
+
+@tool(description="查询天气")
+def get_weather() -> str:
+    return "晴天"
+
+
+agent = create_agent(
+    model=ChatTongyi(model="qwen3-max"),
+    tools=[get_weather],
+    system_prompt="你是一个聊天助手，可以回答用户问题。",
+)
+
+res = agent.invoke(
+    {
+        "messages": [
+            {"role": "user", "content": "明天深圳的天气如何？"},
+        ]
+    }
+)
+
+for msg in res["messages"]:
+    print(type(msg).__name__, msg.content)
+create_agent用于创建一个Agent智能体，有模型、工具、提示词模板三个参数
+tool 装饰器用来把普通Python函数注册成Agent可调用的工具
+流式输出：
+
+from langchain.agents import create_agent
+from langchain_community.chat_models.tongyi import ChatTongyi
+from langchain_core.tools import tool
+
+
+@tool(description="获取股价，传入股票名称，返回字符串信息")
+def get_price(name: str) -> str:
+    return f"股票{name}的价格是20元"
+
+
+@tool(description="获取股票信息，传入股票名称，返回字符串信息")
+def get_info(name: str) -> str:
+    return f"股票{name}，是一家A股上市公司，专注于IT职业教育。"
+
+
+agent = create_agent(
+    model=ChatTongyi(model="qwen3-max"),
+    tools=[get_price, get_info],
+    system_prompt="你是一个智能助手，可以回答股票相关问题，记住请告知我思考过程，让我知道你为什么调用某个工具"
+)
+
+res = agent.stream(
+    {"messages": [{"role": "user", "content": "传智教育股价多少，并介绍一下"}]},
+    stream_mode="values"
+)
+
+for chunk in res:
+    # chunk是agent在某一步执行完之后的当前状态快照（state），是一个字典
+    # 每一个chunk都带有历史记录，所以不能直接print(chunk)
+    latest_message = chunk['messages'][-1]
+
+    if latest_message.content:
+        print(type(latest_message).__name__, latest_message.content)
+
+    try:    # 不是所有消息对象都有tool_calls这个属性
+        if latest_message.tool_calls:
+            print(f"工具调用： { [tc['name'] for tc in latest_message.tool_calls]  }")
+    except AttributeError as e:
+        pass
+latest_message=chunk['messages'][-1]表示取最新状态快照字典
+输出结果：
+
+HumanMessage 传智教育股价多少，并介绍一下
+工具调用： ['get_price', 'get_info']
+ToolMessage 股票传智教育，是一家A股上市公司，专注于IT职业教育。
+AIMessage 传智教育的当前股价是20元。  
+
+此外，传智教育是一家A股上市公司，专注于IT职业教育领域。如果您还有其他问题，欢迎随时提问！
+
+链和智能体的区别
+agent运行模式
+agent的运行有多种模式，最有名的一种是ReAct模式，即Reasoning and Acting——思考与行动。
+
+ReAct模式
+
+ReAct流程
+思考：model决定是否调用工具
+行动：agent调用工具
+观察：查看工具执行结果
+注意，Observation的结果由工具产生，由agent接收并注入上下文，由模型读取后继续思考。
+
+ReAct流程的核心步骤：Thought -> Action -> Observation -> Final Answer
+
+LangChain的Agent对象遵循ReAct框架要求，在执行的过程中会持续的思考、行动、观察。
+from langchain.agents import create_agent
+from langchain_community.chat_models.tongyi import ChatTongyi
+from langchain_core.tools import tool
+
+
+@tool(description="获取体重，返回值是整数，单位千克")
+def get_weight() -> int:
+    return 90
+
+
+@tool(description="获取身高，返回值是整数，单位厘米")
+def get_height() -> int:
+    return 172
+
+
+agent = create_agent(
+    model=ChatTongyi(model="qwen3-max"),
+    tools=[get_weight, get_height],
+    system_prompt="""你是严格遵循ReAct框架的智能体，必须按「思考→行动→观察→再思考」的流程解决问题，
+    且**每轮仅能思考并调用1个工具**，禁止单次调用多个工具。
+    并告知我你的思考过程，工具的调用原因，按思考、行动、观察三个结构告知我""",
+)
+
+for chunk in agent.stream(
+    {"messages": [{"role": "user", "content": "计算我的BMI"}]},
+    stream_mode="values"
+):
+    latest_message = chunk['messages'][-1]
+
+    if latest_message.content:
+        print(type(latest_message).__name__, latest_message.content)
+
+    try:
+        if latest_message.tool_calls:
+            print(f"工具调用： { [tc['name'] for tc in latest_message.tool_calls]  }")
+    except AttributeError as e:
+        pass
+
+
+输出结果：
+
+HumanMessage 计算我的BMI
+AIMessage **思考**：计算BMI需要体重（千克）和身高（厘米）两个数据。根据公式 BMI = 体重(kg) / (身高(m))²，首先需要获取这两个数值。由于工具调用限制每轮只能使用一个工具，我决定先获取体重数据。
+
+**行动**：调用get_weight工具获取体重。
+
+
+工具调用： ['get_weight']
+ToolMessage 90
+AIMessage **观察**：获取到体重为90千克。
+
+**思考**：已经获得体重数据，接下来需要获取身高数据才能计算BMI。根据工具调用规则，现在需要调用get_height工具获取身高。
+
+**行动**：调用get_height工具获取身高。
+
+
+工具调用： ['get_height']
+ToolMessage 172
+AIMessage **观察**：获取到身高为172厘米。
+
+**思考**：现在已获得体重（90kg）和身高（172cm）数据，可计算BMI。根据公式需先将身高转换为米（172cm=1.72m），则BMI=90/(1.72²)=90/2.9584≈30.42。
+
+**行动**：无需调用工具，直接计算并返回结果。
+
+您的BMI为30.42，属于肥胖范围（BMI≥30）。建议关注健康状况并咨询专业医生。
+代码示例：一个可以自己写贪吃蛇游戏的agent
+项目地址：
+
+VideoCode/Agent的概念、原理与构建模式 at main · MarkTechStation/VideoCode
+github.com/MarkTechStation/VideoCode/tree/main/Agent%E7%9A%84%E6%A6%82%E5%BF%B5%E3%80%81%E5%8E%9F%E7%90%86%E4%B8%8E%E6%9E%84%E5%BB%BA%E6%A8%A1%E5%BC%8F
+运行：
+
+
+任务手动输入
+
+运行结果
+
+
+最终输出：
+
+
+得到final answer
+
+运行游戏
+
+游戏界面
+主要程序
+agent.py：主程序入口，负责 Agent 运行逻辑、模型调用、工具调用、命令行启动
+
+"""
+
+实现了一个基于 ReAct思想的命令行Agent。
+
+核心逻辑：
+1.把用户任务和系统提示词一起发给大模型
+2.要求大模型按固定格式输出：
+    <thought>...</thought>：思考过程
+    <action>...</action>：下一步要调用的工具
+    <final_answer>...</final_answer>：最终答案
+3.如果模型输出的是action，程序就解析这个动作、调用对应工具，再把工具返回结果作为<observation>发回模型
+4.如此循环，直到模型输出final_answer
+
+
+代码主要分成两部分：
+1.ReActAgent类：负责和模型对话、解析模型输出、调用工具、组织循环
+2.三个工具函数：
+    read_file
+    write_to_file
+    run_terminal_command
+3.main()：程序入口，启动命令行交互
+
+"""
+
+import ast
+import inspect
+import os
+import re
+from string import Template
+from typing import List, Callable, Tuple
+
+import click
+from dotenv import load_dotenv
+from openai import OpenAI
+import platform
+
+from prompt_template import react_system_prompt_template
+
+
+class ReActAgent:
+    def __init__(self, model: str, tools: List[Callable], project_directory: str):
+        self.client = OpenAI(
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            api_key=ReActAgent.get_api_key(),
+        )
+        self.model = model
+        self.tools = {func.__name__: func for func in tools}                # 把工具列表转成字典，方便按名称调用
+        # {
+        #     "read_file": read_file,
+        #     "write_to_file": write_to_file,
+        #     "run_terminal_command": run_terminal_command
+        # }   这样模型输出 <action>read_file("a.txt")</action> 时，程序就能通过 "read_file" 找到对应函数(?)
+        self.project_directory = project_directory                          # 保存项目目录路径，后面渲染系统提示词时会把目录下文件列给模型(？)
+
+    def run(self, user_input: str):
+        # 1.构造初始消息
+        messages = [
+            {"role": "system", "content": self.render_system_prompt(react_system_prompt_template)},   # 渲染后的系统提示词
+            {"role": "user", "content": f"<question>{user_input}</question>"}                         # 把用户问题包成<question>...</question>
+        ]
+
+        # 2.进入循环
+        while True:
+
+            # 3.请求模型
+            content = self.call_model(messages)
+            # 模型返回如下文本：
+            # <thought>我需要先读一下 main.py 文件</thought>
+            # <action>read_file("main.py")</action>
+            # 或
+            # <thought>我已经完成任务</thought>
+            # <final_answer>问题已经解决。</final_answer>
+
+            # 4.提取Thought
+            # 正则表达式提取模型输出里的<thought>...</thought>
+            thought_match = re.search(r"<thought>(.*?)</thought>", content, re.DOTALL)
+            if thought_match:
+                thought = thought_match.group(1)
+                # 打印
+                print(f"\n\n💭 Thought: {thought}")
+
+            # 5.检测模型是否输出Final Answer
+            final_answer_match = re.search(r"<final_answer>(.*?)</final_answer>", content, re.DOTALL)
+            # 是，直接返回
+            if final_answer_match:
+                return final_answer_match.group(1).strip()
+
+            # 6.否，提取Action并执行
+            action_match = re.search(r"<action>(.*?)</action>", content, re.DOTALL)
+            if not action_match:
+                raise RuntimeError("模型未输出 <action>")
+            # 解析动作
+            action = action_match.group(1)
+            tool_name, args = self.parse_action(action)
+            # 打印
+            print(f"\n\n🔧 Action: {tool_name}({', '.join(args)})")
+            # 危险命令（终端命令）需要人工确认
+            should_continue = input(f"\n\n是否继续？（Y/N）") if tool_name == "run_terminal_command" else "y"
+            if should_continue.lower() != 'y':
+                print("\n\n操作已取消。")
+                return "操作被用户取消"
+            # 执行
+            try:
+                observation = self.tools[tool_name](*args)
+                # 工具根据工具名从self.tools中找到对应函数，并传入参数执行
+                # 然后返回一个observation，如：
+                # <observation>README.md 的内容是：...</observation>
+            except Exception as e:
+                observation = f"工具执行错误：{str(e)}"
+
+            # 7.把observation返回给模型
+            # 打印
+            print(f"\n\n🔍 Observation：{observation}")
+            # 把observation追加进对话历史，继续发给模型
+            obs_msg = f"<observation>{observation}</observation>"
+            messages.append({"role": "user", "content": obs_msg})           # 注意：工具返回结果被当作“用户消息”喂给模型，意思是：把外部环境反馈作为新输入提供给模型
+
+    def get_tool_list(self) -> str:
+        """生成工具列表字符串，包含函数签名和简要说明，供系统提示词使用"""
+        tool_descriptions = []
+        for func in self.tools.values():
+            name = func.__name__
+            signature = str(inspect.signature(func))        # 函数签名
+            doc = inspect.getdoc(func)                      # 简要说明
+            tool_descriptions.append(f"- {name}{signature}: {doc}")
+        return "\n".join(tool_descriptions)
+    # 最后返回：
+    # - add(a: int, b: int): 计算两个数之和
+    # - search(query: str): 根据关键词搜索内容
+    # - save(data: dict, path: str): 保存数据到文件
+
+    def render_system_prompt(self, system_prompt_template: str) -> str:
+        """把系统提示模板中的变量替换成真实内容"""
+        tool_list = self.get_tool_list()
+        file_list = ", ".join(                                              # 对目录中的每个文件名f，都生成它的绝对路径，并用逗号和空格拼接成一个字符串
+            os.path.abspath(os.path.join(self.project_directory, f))
+            for f in os.listdir(self.project_directory)
+        )
+        return Template(system_prompt_template).substitute(                 # 把模板中的变量替换成真实值
+            operating_system=self.get_operating_system_name(),
+            tool_list=tool_list,
+            file_list=file_list
+        )
+
+    @staticmethod
+    def get_api_key() -> str:
+        """从.env文件或环境变量中读取API Key"""
+        load_dotenv()                                       # 加载.env文件
+        api_key = os.getenv("DASHSCOPE_API_KEY")
+        if not api_key:
+            raise ValueError("未找到 DASHSCOPE_API_KEY 环境变量，请在 .env 文件中设置。")
+        return api_key
+
+    def call_model(self, messages):
+        """向模型发送一次对话请求，拿到模型回复，把回复追加到messages里，并返回回复内容"""
+        print("\n\n正在请求模型，请稍等...")
+        response = self.client.chat.completions.create(                     # 向模型发送请求
+            model=self.model,
+            messages=messages,
+        )
+        content = response.choices[0].message.content
+        messages.append({"role": "assistant", "content": content})
+        return content
+
+    def parse_action(self, code_str: str) -> Tuple[str, List[str]]:
+        match = re.match(r'(\w+)\((.*)\)', code_str, re.DOTALL)
+        if not match:
+            raise ValueError("Invalid function call syntax")
+
+        func_name = match.group(1)
+        args_str = match.group(2).strip()
+
+        # 手动解析参数，特别处理包含多行内容的字符串
+        args = []
+        current_arg = ""
+        in_string = False
+        string_char = None
+        i = 0
+        paren_depth = 0
+        
+        while i < len(args_str):
+            char = args_str[i]
+            
+            if not in_string:
+                if char in ['"', "'"]:
+                    in_string = True
+                    string_char = char
+                    current_arg += char
+                elif char == '(':
+                    paren_depth += 1
+                    current_arg += char
+                elif char == ')':
+                    paren_depth -= 1
+                    current_arg += char
+                elif char == ',' and paren_depth == 0:
+                    # 遇到顶层逗号，结束当前参数
+                    args.append(self._parse_single_arg(current_arg.strip()))
+                    current_arg = ""
+                else:
+                    current_arg += char
+            else:
+                current_arg += char
+                if char == string_char and (i == 0 or args_str[i-1] != '\\'):
+                    in_string = False
+                    string_char = None
+            
+            i += 1
+        
+        # 添加最后一个参数
+        if current_arg.strip():
+            args.append(self._parse_single_arg(current_arg.strip()))
+        
+        return func_name, args
+    
+    def _parse_single_arg(self, arg_str: str):
+        """解析单个参数"""
+        arg_str = arg_str.strip()
+        
+        # 如果是字符串字面量
+        if (arg_str.startswith('"') and arg_str.endswith('"')) or \
+           (arg_str.startswith("'") and arg_str.endswith("'")):
+            # 移除外层引号并处理转义字符
+            inner_str = arg_str[1:-1]
+            # 处理常见的转义字符
+            inner_str = inner_str.replace('\\"', '"').replace("\\'", "'")
+            inner_str = inner_str.replace('\\n', '\n').replace('\\t', '\t')
+            inner_str = inner_str.replace('\\r', '\r').replace('\\\\', '\\')
+            return inner_str
+        
+        # 尝试使用 ast.literal_eval 解析其他类型
+        try:
+            return ast.literal_eval(arg_str)
+        except (SyntaxError, ValueError):
+            # 如果解析失败，返回原始字符串
+            return arg_str
+
+    def get_operating_system_name(self):
+        os_map = {
+            "Darwin": "macOS",
+            "Windows": "Windows",
+            "Linux": "Linux"
+        }
+        return os_map.get(platform.system(), "Unknown")
+
+
+def read_file(file_path):
+    """用于读取文件内容"""
+    with open(file_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+def write_to_file(file_path, content):
+    """将指定内容写入指定文件"""
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(content.replace("\\n", "\n"))
+    return "写入成功"
+
+def run_terminal_command(command):
+    """用于执行终端命令"""
+    import subprocess
+    run_result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    return "执行成功" if run_result.returncode == 0 else run_result.stderr
+
+@click.command()
+@click.argument('project_directory',
+                type=click.Path(exists=True, file_okay=False, dir_okay=True)
+                )
+def main(project_directory):
+    """
+    流程：
+        获取项目绝对路径
+        注册三个工具
+        创建Agent
+        用户输入任务
+        执行Agent
+        输出最终答案
+    """
+    project_dir = os.path.abspath(project_directory)
+    tools = [read_file, write_to_file, run_terminal_command]
+    agent = ReActAgent(tools=tools, model="qwen3-max", project_directory=project_dir)
+
+    task = input("请输入任务：")
+    final_answer = agent.run(task)
+    print(f"\n\n✅ Final Answer：{final_answer}")
+
+if __name__ == "__main__":
+    main()
+ReActAgent ：整个项目的核心类，负责和模型对话、解析模型输出、调用工具、组织循环
+run(self, user_input)：ReActAgent类最关键的方法，负责构造初始消息 -> 进入循环 -> 请求模型 -> 提取Thought -> 检测模型是否输出Final Answer -> 否，提取Action并执行 -> 把observation返回给模型
+ReActAgent类还包含get_tool_list，render_system_prompt，get_api_key，call_model，parse_action等函数
+三个工具函数：
+read_file
+write_to_file
+run_terminal_command
+main() 程序入口：启动命令行交互
+prompt_template.py ：给模型看的系统提示词模板，定义模型应该怎么回答、怎么调用工具、输出必须长什么样
+
+react_system_prompt_template = """
+你需要解决一个问题。为此，你需要将问题分解为多个步骤。对于每个步骤，首先使用 <thought> 思考要做什么，然后使用可用工具之一决定一个 <action>。接着，你将根据你的行动从环境/工具中收到一个 <observation>。持续这个思考和行动的过程，直到你有足够的信息来提供 <final_answer>。
+
+所有步骤请严格使用以下 XML 标签格式输出：
+- <question> 用户问题
+- <thought> 思考
+- <action> 采取的工具操作
+- <observation> 工具或环境返回的结果
+- <final_answer> 最终答案
+
+⸻
+
+例子 1:
+
+<question>埃菲尔铁塔有多高？</question>
+<thought>我需要找到埃菲尔铁塔的高度。可以使用搜索工具。</thought>
+<action>get_height("埃菲尔铁塔")</action>
+<observation>埃菲尔铁塔的高度约为330米（包含天线）。</observation>
+<thought>搜索结果显示了高度。我已经得到答案了。</thought>
+<final_answer>埃菲尔铁塔的高度约为330米。</final_answer>
+
+⸻
+
+例子 2:
+
+<question>帮我找一个简单的番茄炒蛋食谱，并看看家里的冰箱里有没有西红柿。</question>
+<thought>这个任务分两步。第一步，找到番茄炒蛋的食谱。第二步，检查冰箱里是否有西红柿。我先用 find_recipe 工具找食谱。</thought>
+<action>find_recipe(dish="番茄炒蛋")</action>
+<observation>简单的番茄炒蛋食谱：将2个鸡蛋打散，2个番茄切块。热油，先炒鸡蛋，盛出。再热油，炒番茄至软烂，加入鸡蛋，放盐调味即可。</observation>
+<thought>好的，我已经有食谱了。食谱需要西红柿。现在我需要用 check_fridge 工具看看冰箱里有没有西红柿。</thought>
+<action>check_fridge(item="西红柿")</action>
+<observation>冰箱检查结果：有3个西红柿。</observation>
+<thought>我找到了食谱，并且确认了冰箱里有西红柿。可以回答问题了。</thought>
+<final_answer>简单的番茄炒蛋食谱是：鸡蛋打散，番茄切块。先炒鸡蛋，再炒番茄，混合后加盐调味。冰箱里有3个西红柿。</final_answer>
+
+⸻
+
+请严格遵守：
+- 你每次回答都必须包括两个标签，第一个是 <thought>，第二个是 <action> 或 <final_answer>
+- 输出 <action> 后立即停止生成，等待真实的 <observation>，擅自生成 <observation> 将导致错误
+- 如果 <action> 中的某个工具参数有多行的话，请使用 \n 来表示，如：<action>write_to_file("/tmp/test.txt", "a\nb\nc")</action>
+- 工具参数中的文件路径请使用绝对路径，不要只给出一个文件名。比如要写 write_to_file("/tmp/test.txt", "内容")，而不是 write_to_file("test.txt", "内容")
+
+⸻
+
+本次任务可用工具：
+${tool_list}
+
+⸻
+
+环境信息：
+
+操作系统：${operating_system}
+当前目录下文件列表：${file_list}
+"""
+模板里规定了模型必须使用这些 XML 标签：
+
+<question>
+<thought>
+<action>
+<observation>
+<final_answer>
+还给了两个示例，告诉模型应该如何一步步思考、调用工具、等待 observation、最后再总结。
+
+另外，它还特别强调了几条规则：
+
+每次回答必须先有 <thought>
+第二个标签必须是 <action> 或 <final_answer>
+输出 <action> 后必须停止，等待真实 observation
+多行参数要写成 \n
+文件路径要用绝对路径
+目的：规范输出格式、教模型使用工具、减少模型乱编
+
+小结：
+
+程序组成
+
+程序的ReAct时序图（注意，是模型决定action还是final answer）
+middleware中间件
+中间件对agent的每一步工作加以拦截，在拦截的过程中，就可以完成我们自定义的逻辑。
+
+
+LangChain中内置了一些基础的中间件，参见：
+
+https://docs.langchain.com/oss/python/langchain/middleware/built-in
+docs.langchain.com/oss/python/langchain/middleware/built-in
+LangChain在一些关键执行节点预留了“Hooks”——钩子位置[1]，我们可以在这些位置插入自己的逻辑，实现自定义中间件。
+
+自定义中间件可以简单的使用装饰器来定义。
+
+两类六种装饰器：
+节点式钩子：在固定执行节点上插入逻辑
+
+before_agent：在 agent 开始运行前触发
+适合做初始化、参数检查、日志记录、上下文注入。
+after_agent：在 agent 运行结束后触发
+适合做结果记录、后处理、统计耗时、统一输出格式。
+before_model：在模型真正调用前触发
+适合修改 prompt、补充 system message、鉴权、限流。
+after_model：在模型调用完成后触发
+适合清洗模型输出、解析结果、记录 token 使用量。
+针对工具和模型的包装式钩子：把一次调用整体包起来
+
+wrap_model_call：把每次模型调用包起来（模型执行中）
+也就是每调用一次 LLM，它都会先经过你的包装逻辑，可以打印日志、统计耗时、捕获模型报错。
+wrap_tool_call：把每次工具调用包起来（工具执行中）
+比如 agent 调用搜索工具、数据库工具、计算工具时，你都能统一拦截。
+节点式钩子更像“流程中的通知点”，包装式钩子更像“整次调用的控制器”
+from langchain.agents import create_agent, AgentState
+from langchain.agents.middleware import before_agent, after_agent, before_model, after_model, wrap_model_call, \
+    wrap_tool_call
+from langchain_community.chat_models.tongyi import ChatTongyi
+from langchain_core.tools import tool
+from langgraph.runtime import Runtime
+
+
+@tool(description="查询天气。传入城市名称字符串，返回字符串天气信息")
+def get_weather(city: str) -> str:
+    return f"{city}天气：晴天"
+
+
+@before_agent
+def log_before_agent(state: AgentState, runtime: Runtime) -> None:
+    """
+
+    state：当前agent的状态数据，通常会包含消息历史、上下文等
+    runtime：运行时对象，通常包含执行环境相关信息
+
+    """
+    print(f"[before agent]agent启动，并附带{len(state['messages'])}消息")
+
+
+@after_agent
+def log_after_agent(state: AgentState, runtime: Runtime) -> None:
+    print(f"[after agent]agent结束，并附带{len(state['messages'])}消息")
+
+
+@before_model
+def log_before_model(state: AgentState, runtime: Runtime) -> None:
+    """打印“模型即将调用”，并显示此刻传给模型的消息数"""
+    print(f"[before_model]模型即将调用，并附带{len(state['messages'])}消息")
+
+
+@after_model
+def log_after_model(state: AgentState, runtime: Runtime) -> None:
+    print(f"[after_model]模型调用结束，并附带{len(state['messages'])}消息")
+
+
+@wrap_model_call
+def model_call_hook(request, handler):
+    """
+
+    request：这次模型调用的请求对象，里面一般有模型输入等信息
+    handler：真正执行模型调用的函数
+
+    把整次模型调用接过来，自己决定怎么放行。
+    也就是它能控制：
+    1.调用前做什么
+    2.调用时是否继续执行
+    3.调用后做什么
+    4.出错时怎么处理
+
+    """
+    print("模型调用前")
+    result = handler(request)
+    print("模型调用后")
+    return result
+
+
+@wrap_tool_call
+def monitor_tool(request, handler):
+    print(f"工具执行：{request.tool_call['name']}")
+    print(f"工具执行传入参数：{request.tool_call['args']}")
+    return handler(request)
+
+
+agent = create_agent(
+    model=ChatTongyi(model="qwen3-max"),
+    tools=[get_weather],
+    middleware=[log_before_agent, log_after_agent, log_before_model, log_after_model, model_call_hook, monitor_tool]
+)
+
+res = agent.invoke({"messages": [{"role": "user", "content": "深圳今天的天气如何呀，如何穿衣"}]})
+print("**********\n", res)
+
+
+大致流程：
+用户提问
+agent 启动
+模型判断要不要用工具
+调用天气工具
+工具结果回给模型
+模型生成最终回答
+agent 结束
+全部流程：
+用户发问
+↓
+before_agent
+↓
+第一次模型调用前：
+before_model
+wrap_model_call（调用前）
+真正调用模型
+wrap_model_call（调用后）
+after_model
+↓
+模型判断：需要调用 get_weather
+↓
+wrap_tool_call（调用前）
+↓
+执行 get_weather("深圳")
+↓
+wrap_tool_call（调用后）
+↓
+把工具结果加入消息上下文
+↓
+第二次模型调用前：
+before_model
+wrap_model_call（调用前）
+真正调用模型
+wrap_model_call（调用后）
+after_model
+↓
+模型基于天气结果生成最终回答
+↓
+after_agent
+↓
+返回 res
+
+Plan and Excute模式
+一种先规划、再执行的智能体工作方式。
+
+
+注意：agent套agent
+
+
+
+时序图
+具体流程：
+
+
+Plan模型给出第一轮执行计划，执行agent执行，并加入历史执行记录
+
+把用户问题、第一轮执行计划、历史执行记录一起交给Re-Plan模型，给出第二轮执行计划
+
+agent执行第二轮执行计划，并加入历史执行记录
+
+把用户问题、第二轮执行计划、历史执行记录一起交给Re-Plan模型，给出第三轮执行计划
+
+agent执行第三轮执行计划，并加入历史执行记录
+
+把用户问题、第三轮执行计划、历史执行记录一起交给Re-Plan模型，给出最终答案
+一个简单例子：
+
+用户目标是帮我策划一次去东京的 5 天旅行，Plan and Execute agent可能这样工作：
+
+Plan：
+
+确认预算和出行日期
+查询机票和酒店
+设计每日行程
+推荐交通方案
+汇总成旅行计划
+Execute：
+
+查机票
+查酒店
+查景点开放时间
+安排行程顺序
+输出最终攻略
+经过五轮循环后获得最终答案。
+
+项目以大模型为核心，结合RAG检索增强与Agent任务处理能力，一方面从知识库中检索准确的产品与售后信息，支持功能、价格、对比、操作指导、故障排查和维护建议等智能问答；另一方面面向已购用户，对扫地机器人的使用数据进行分析，如清洁频率、耗材状态和错误日志等，自动生成个性化使用报告与优化建议，帮助用户提升设备使用效率和产品价值。
+
+知识库
+
+项目分层
+Streamlit 前端
+
+LangChain Agent
+
+工具层
+
+中间件层
+
+RAG 服务层
+
+向量库层
+
+主方法链
+app.py
+└── ReactAgent().stream_response(query)
+    └── LangChain create_agent(...).stream(...)
+        ├── before_model: log_before_model(...)
+        ├── dynamic_prompt: report_prompt_switch(...)
+        ├── 如果模型决定调用工具:
+        │   └── wrap_tool_call: monitor_tool(...)
+        │       └── handler(request)
+        │           ├── answer(query)
+        │           │   └── RagSummarizeService.answer(query)
+        │           │       ├── retrieve_documents(query)
+        │           │       │   └── retriever.invoke(query)
+        │           │       └── chain.invoke({"input", "context"})
+        │           ├── get_weather(city)
+        │           ├── get_user_location()
+        │           ├── get_user_id()
+        │           ├── get_current_month()
+        │           ├── fetch_external_data(user_id, month)
+        │           │   └── load_external_data()
+        │           └── fill_context_for_report()
+        └── 输出最终消息流
+分层详解
+前端层
+只负责 UI 和会话状态：
+
+页面初始化
+保存 agent
+保存历史消息
+把用户输入交给 ReactAgent
+用 write_stream 流式显示结果
+本身不处理业务逻辑，只是入口。
+
+Agent层
+整个业务的中枢。初始化时，它把：
+
+模型 chat_model
+系统提示词 load_system_prompts()
+tools
+middleware
+都装配进 create_agent(...)，而 stream_response() 是真正运行 Agent 的地方。
+
+工具层
+给 Agent 提供“能力”的地方。工具分四类：
+
+1. RAG 工具
+
+answer(query) → 直接调用全局对象 rag.answer(query) ，即：
+
+answer()
+└── RagSummarizeService.answer()
+2. 模拟工具
+
+get_weather、get_user_location、get_user_id、get_current_month 都是 mock/stub，因为天气是固定文本、城市/用户ID/月是随机返回。
+
+3. 外部数据工具
+
+fetch_external_data(user_id, month) 会先调用 load_external_data()，把 CSV 风格数据读进内存，再返回某用户某月的记录，即：
+
+fetch_external_data(user_id, month)
+└── load_external_data()
+    ├── get_abs_path(agent_config["external_data_path"])
+    ├── open(file)
+    └── 构造 external_data[user_id][month] = {...}
+4.特殊工具
+
+fill_context_for_report()只返回一句话，但它的真实作用不在返回值，而在被 middleware 识别后触发上下文切换，实现提示词切换。
+
+中间件层
+负责把“普通工具”调用变成“可观测、可切换 prompt”的工具调用。
+
+1. monitor_tool
+
+是 @wrap_tool_call 中间件。流程是：
+
+记录工具名和参数
+调 handler(request) 执行真正工具
+若工具名是 fill_context_for_report，就设置 request.runtime.context["report"] = True
+返回执行结果
+异常处理
+即：
+
+monitor_tool(request, handler)
+└── result = handler(request)
+    └── 真正执行某个 tool
+然后:
+if tool_name == "fill_context_for_report":
+    runtime.context["report"] = True
+
+return result
+2. log_before_model
+
+在每次模型调用前打印日志，记录消息条数和最后一条消息内容。
+
+3. report_prompt_switch
+
+是 @dynamic_prompt，会读取 runtime.context["report"]：
+
+False → load_system_prompts()
+True → load_report_prompts()
+所以“报告模式”的实质调用链是：
+
+Agent 先调用 fill_context_for_report()
+└── monitor_tool 发现该工具
+    └── runtime.context["report"] = True
+下一次模型调用前
+└── report_prompt_switch()
+    └── 改用 report prompt
+RAG 服务层
+RagSummarizeService 是一个“单轮检索总结器”，即：
+
+单轮检索 + 拼接上下文 + 一次总结生成。
+
+初始化时：
+
+RagSummarizeService.__init__()
+├── self.vector_store = VectorStoreService()
+├── self.retriever = self.vector_store.get_retriever()
+├── self.prompt_text = load_rag_prompts()
+├── self.prompt_template = PromptTemplate.from_template(...)
+├── self.model = chat_model
+└── self.chain = self._init_chain()
+_init_chain() 里真正组装链：
+
+PromptTemplate | chat_model | StrOutputParser
+answer(query) 的调用链是：
+
+answer(query)
+├── retrieve_documents(query)
+│   └── retriever.invoke(query)
+├── 遍历 documents 拼 context
+└── chain.invoke({"input": query, "context": context})
+向量库层
+VectorStoreService 做两件事：
+
+1. 在线检索
+初始化时创建：
+
+Chroma(...)
+RecursiveCharacterTextSplitter(...)
+get_retriever() 返回：
+
+self.vector_store.as_retriever(search_kwargs={"k": chroma_config["k"]})
+也就是供 RagSummarizeService.retrieve_documents() 调用的 retriever。
+
+2. 离线入库
+ingest_documents() 的完整调用关系是：
+
+ingest_documents()
+├── check_md5(md5)
+├── save_md5(md5)
+├── get_file_documents(path)
+│   ├── txt_loader(path)
+│   └── pdf_loader(path)
+├── list_files_by_suffix(data_path, allowed_file_type)
+├── for each file:
+│   ├── get_file_md5(path)
+│   ├── check_md5(md5)
+│   ├── get_file_documents(path)
+│   ├── self.spliter.split_documents(documents)
+│   ├── self.vector_store.add_documents(split_document)
+│   └── save_md5(md5)
+文件处理能力拆在了 file_utils.py：
+
+get_file_md5
+list_files_by_suffix
+pdf_loader
+txt_loader
+配置、路径、提示词、模型的底层支撑
+1. 路径统一：path_tool.py
+get_project_root() 找项目根目录，get_abs_path(relative_path) 负责把相对路径统一转成绝对路径。整个工程的配置、日志、prompt、数据文件定位都依赖它。
+
+2. 配置加载：config_utils.py
+四类配置在模块导入时就被加载成全局变量：
+
+rag_config
+chroma_config
+prompts_config
+agent_config。
+所以后续别的模块都是直接 from utils.config_utils import rag_config 这种方式拿配置。
+
+3. 提示词加载：prompt_loader.py
+提供三种 prompt：
+
+load_system_prompts()
+load_rag_prompts()
+load_report_prompts()。
+调用位置分别是：
+
+Agent 初始化：load_system_prompts()
+RAG 初始化：load_rag_prompts()
+middleware 动态切换：load_report_prompts() / load_system_prompts()
+4. 模型工厂：factory.py
+工厂模式统一创建：
+
+chat_model = ChatTongyi(...)
+embedding_model = DashScopeEmbeddings(...)。
+其下游调用关系很清晰：
+
+chat_model 被 Agent 和 RAG 复用
+embedding_model 被 Chroma 向量库使用
+5. 日志：logger_utils.py
+get_logger() 会创建统一 logger，并同时挂控制台handler和文件handler，避免重复添加 handler。这个 logger 被工具层、中间件层、文件处理层复用。
+
+三条实际业务流程
+普通问答流程
+用户输入问题
+→ app.py 接收 prompt
+→ ReactAgent.stream_response(prompt)
+→ Agent 用 system prompt 推理
+→ 如需知识检索，则调用 answer(query)
+→ RagSummarizeService.answer(query)
+→ retriever.invoke(query) 检索向量库
+→ 组装 context
+→ LLM 生成总结
+→ 前端流式展示
+报告生成流程
+用户提出“生成报告”
+→ Agent 决定先调用 fill_context_for_report()
+→ monitor_tool 拦截后把 runtime.context["report"] = True
+→ 下一次模型调用时，report_prompt_switch() 切到 report prompt
+→ Agent 再调用 get_user_id() / get_current_month() / fetch_external_data(...)
+→ 收集到外部数据后生成报告文本
+→ 前端流式输出
+知识入库流程
+运行 VectorStoreService().ingest_documents()
+→ 列出 data 目录下允许的文件
+→ 计算 MD5
+→ 查重
+→ txt/pdf loader 转成 Document
+→ splitter 分块
+→ add_documents 写入 Chroma
+→ 保存 md5
+
+
+代码实现
+utils/path_tool.py
+为整个项目统一提供“项目根目录”和“基于项目根目录的绝对路径”，方便在任意模块中访问配置文件、数据文件、日志目录等资源，而不需要手动写死路径
+
+""" 为整个工程提供统一的绝对路径，让整个工程在任何运行位置下都能稳定找到同一份资源 """
+
+import os
+
+
+def get_project_root() -> str:
+    """ 获取工程所在的根目录 """
+    # 当前脚本文件路径，即D:\PythonProject\Agent_Project\utils\path_tool.py
+    script_path = os.path.abspath(__file__)                # __file__：utils/path_tool.py
+    # 当前脚本所在目录，即D:\PythonProject\Agent_Project\utils
+    script_dir = os.path.dirname(script_path)
+    # 项目根目录，即D:\PythonProject\Agent_Project
+    project_dir = os.path.dirname(script_dir)
+
+    return project_dir
+
+
+def get_abs_path(relative_path: str) -> str:
+    """ 传递相对路径，得到绝对路径 """
+    project_dir = get_project_root()                       # D:\PythonProject\Agent_Project
+    return os.path.join(project_dir, relative_path)        # D:\PythonProject\Agent_Project\config/config.txt
+
+
+if __name__ == '__main__':
+    print(get_abs_path("config/config.txt"))
+utils/logger_handler.py
+统一创建 logger，让日志能够同时输出到控制台和日志文件，并且控制两边的日志级别与输出格式，方便调试、排查问题和长期留痕
+
+"""
+
+创建一个logger，让日志同时输出到控制台和日志文件
+
+主要完成了三件事：
+1.创建日志目录
+2.定义统一的日志格式
+3.封装一个通用的get_logger()方法
+
+"""
+
+import logging
+from utils.path_tool import get_abs_path
+import os
+from datetime import datetime
+
+
+
+LOG_ROOT = get_abs_path("logs")                                 # 日志根目录
+os.makedirs(LOG_ROOT, exist_ok=True)                            # 日志根目录存在，ok；不存在，创建
+DEFAULT_LOG_FORMAT = logging.Formatter(                         # 定义日志输出格式
+    '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+)
+
+
+
+def get_logger(
+        name: str = "agent",
+        console_level: int = logging.INFO,                      # 控制台只显示INFO及以上的日志，不显示DEBUG
+        file_level: int = logging.DEBUG,
+        log_path = None,
+) -> logging.Logger:
+    """
+
+    明确目标：
+    返回一个可直接使用的logger
+    日志同时输出到控制台和文件
+    控制台和文件可以设置不同级别
+    日志格式统一
+    避免重复添加handler，防止日志重复打印
+
+    """
+    # 1.获取一个logger对象
+    logger = logging.getLogger(name)                            # 注意：同名logger是同一个对象
+    # 2.设置logger的总开关级别
+    logger.setLevel(logging.DEBUG)                              # 决定哪些级别的日志有资格继续分发给各个handler
+    # 3.判断这个logger有没有handler
+    # 多次“logger.info/error...”会多次执行get_logger()，本质上是在给一个名为“agent”的logger反复挂handler
+    # 而logger收到一条日志后，会把这条日志依次交给它身上的每一个handler去处理（见最下），故会重复打印
+    if logger.handlers:
+        return logger
+    # 4.给logger挂上“控制台控制器”
+    console_handler = logging.StreamHandler()                   # 创建console handler
+    console_handler.setLevel(console_level)                     # 设置输出级别
+    console_handler.setFormatter(DEFAULT_LOG_FORMAT)            # 设置日志格式
+    logger.addHandler(console_handler)                          # 挂到logger上
+    # 5.给logger挂上“文件控制器”
+    if not log_path:
+        log_path = os.path.join(LOG_ROOT, f"{name}_{datetime.now().strftime('%Y%m%d')}.log")
+    file_handler = logging.FileHandler(log_path, encoding='utf-8')
+    file_handler.setLevel(file_level)
+    file_handler.setFormatter(DEFAULT_LOG_FORMAT)
+    logger.addHandler(file_handler)
+    # 6.返回logger对象
+    return logger
+
+# 快捷获取日志器（后面直接import logger这个变量就可以，否则用时还要get_logger()）
+logger = get_logger()
+
+
+if __name__ == '__main__':
+    logger.info("信息日志")
+    logger.error("错误日志")
+    logger.warning("警告日志")
+    logger.debug("调试日志")
+    # logger.info("信息日志")
+    # 1.检查logger是否允许INFO级别通过
+    # 2.logger创建一条LogRecord，装着这次日志的各种信息
+    # 3.logger把这条日志交给它的handlers，每个handler再各自判断一次能否放行
+    # 4.handler用formatter把日志格式化
+    # 5.各个handler输出
+一个很重要的保护逻辑：防止同一个logger被重复挂载handler
+utils/config_utils.py
+统一读取项目中的多个 YAML 配置文件，并将其解析为 Python 字典，供系统其他模块直接调用。
+
+"""
+
+读配置文件，并把文件内容（k:v）加载成字典返回。
+
+四个函数（四个配置文件）思想：
+先通过get_abs_path()获取配置文件的绝对路径
+再用open()打开文件读取
+然后用yaml.load()解析文件内容
+最后返回解析后的Python对象
+
+"""
+
+import yaml
+from utils.path_tool import get_abs_path
+
+
+
+def load_rag_config(path: str = get_abs_path("config/rag_config.yml"), encoding: str= "utf-8"):
+    with open(path, "r", encoding=encoding) as f:             # 以只读模式打开配置文件，文件对象命名为f，用完自动关闭文件
+        return yaml.load(f, Loader=yaml.FullLoader)           # 把YAML文件内容解析成Python字典并返回
+
+def load_chroma_config(path: str = get_abs_path("config/chroma_config.yml"), encoding: str= "utf-8"):
+    with open(path, "r", encoding=encoding) as f:
+        return yaml.load(f, Loader=yaml.FullLoader)
+
+def load_prompts_config(path: str = get_abs_path("config/prompts_config.yml"), encoding: str= "utf-8"):
+    with open(path, "r", encoding=encoding) as f:
+        return yaml.load(f, Loader=yaml.FullLoader)
+
+def load_agent_config(path: str = get_abs_path("config/agent_config.yml"), encoding: str= "utf-8"):
+    with open(path, "r", encoding=encoding) as f:
+        return yaml.load(f, Loader=yaml.FullLoader)
+
+rag_config = load_rag_config()          # 返回的是字典
+chroma_config = load_chroma_config()
+prompts_config = load_prompts_config()
+agent_config = load_agent_config()
+
+
+
+if __name__ == '__main__':
+    print(rag_config["chat_model_name"])
+utils/file_utils.py
+一个文件处理工具模块，主要提供三类能力：
+
+计算文件 MD5
+筛选目录下指定类型的文件
+加载 PDF / TXT 文档，转成 LangChain 的 Document 对象
+"""
+
+一个文件处理工具模块，提供三类能力：
+1.计算文件的MD5值
+2.筛选目录下指定类型的文件
+3.加载PDF/TXT文档，转成LangChain的Document对象
+
+"""
+
+
+
+import os
+import hashlib
+from utils.logger_utils import logger
+from langchain_core.documents import Document
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+
+
+def get_file_md5(path: str):
+    # 1.先判断路径是否存在
+    if not os.path.exists(path):
+        logger.error(f"[md5计算]文件{path}不存在")
+        return
+    # 2.再判断路径是否是文件
+    if not os.path.isfile(path):
+        logger.error(f"[md5计算]路径{path}不是文件")
+        return
+    # 3.创建md5对象
+    md5_obj = hashlib.md5()
+    # 4.读取文件
+    chunk_size = 4096                                           # 4KB分片，避免文件过大，爆内存
+    try:
+        with open(path, "rb") as f:                             # 二进制模式打开文件
+            while chunk := f.read(chunk_size):                  # 循环分片读取
+                md5_obj.update(chunk)                           # md5对象更新（把片传进去）
+            """
+            chunk = f.read(chunk_size)
+            while chunk:
+                md5_obj.update(chunk)
+                chunk = f.read(chunk_size)
+            """
+            # 5.把最终结果转成十六进制字符串并返回
+            return md5_obj.hexdigest()
+    # 6.异常处理
+    except Exception as e:
+        logger.error(f"计算文件{path}的md5失败，{str(e)}")
+        return None
+
+
+def list_files_by_suffix(path: str, allowed_types: tuple[str]):
+    """ 遍历某个目录，筛选出指定后缀类型的文件，并返回路径列表 """
+    # 1.判断是不是文件夹
+    if not os.path.isdir(path):
+        logger.error(f"[listdir_with_allowed_type]{path}不是文件夹")
+        return tuple()
+    # 2.准备文件路径列表
+    files = []
+    # 3.遍历目录下的所有文件名
+    for f in os.listdir(path):
+        # 4.按后缀筛选，拼路径、加入路径列表
+        if f.endswith(allowed_types):
+            files.append(os.path.join(path, f))                 # path是文件夹目录，f是目录下的文件的带后缀文件名
+    # 5.把列表转成元组返回
+    return tuple(files)
+
+
+def pdf_loader(path: str, passwd=None) -> list[Document]:
+    """ 用LangChain的PyPDFLoader把PDF文件加载成Document列表（列表中只有一个document） """
+    return PyPDFLoader(path, passwd).load()
+
+
+def txt_loader(path: str) -> list[Document]:
+    return TextLoader(path, encoding="utf-8").load()
+utils/prompt_loader.py
+负责加载各提示词，从配置文件中读取提示词文件路径，再把对应的prompt文本内容加载到程序里，供 Agent、RAG和报告生成模块使用。
+
+"""
+
+从prompts.yml配置里取出提示词文件路径，再读取对应的提示词文本内容
+
+三个函数（三种提示词）思想：
+1.从prompts_config.yml里拿到某个prompt文件路径，并拼成绝对路径
+2.打开文件，读取内容
+3.返回提示词文本
+
+两个异常：配置项缺失、读取失败
+
+"""
+from utils.config_utils import prompts_config
+from utils.path_tool import get_abs_path
+from utils.logger_utils import logger
+
+
+def load_system_prompts():
+    try:
+        system_prompt_path = get_abs_path(prompts_config["main_prompt_path"])
+    except KeyError as e:       # 配置项缺失
+        logger.error(f"[load_system_prompts]在yaml配置项中没有main_prompt_path配置项")
+        raise e                 # 如果这里只写日志，不raise，外部可能以为函数执行成功了，但实际上并没有拿到prompt内容。
+
+    try:
+        return open(system_prompt_path, "r", encoding="utf-8").read()
+    except Exception as e:      # 文件读取失败
+        logger.error(f"[load_system_prompts]解析系统提示词出错，{str(e)}")
+        raise e
+
+
+def load_rag_prompts():
+    try:
+        rag_prompt_path = get_abs_path(prompts_config["rag_summarize_prompt_path"])
+    except KeyError as e:
+        logger.error(f"[load_rag_prompts]在yaml配置项中没有rag_summarize_prompt_path配置项")
+        raise e
+
+    try:
+        return open(rag_prompt_path, "r", encoding="utf-8").read()
+    except Exception as e:
+        logger.error(f"[load_rag_prompts]解析RAG总结提示词出错，{str(e)}")
+        raise e
+
+
+def load_report_prompts():
+    try:
+        report_prompt_path = get_abs_path(prompts_config["report_prompt_path"])
+    except KeyError as e:
+        logger.error(f"[load_report_prompts]在yaml配置项中没有report_prompt_path配置项")
+        raise e
+
+    try:
+        return open(report_prompt_path, "r", encoding="utf-8").read()
+    except Exception as e:
+        logger.error(f"[load_report_prompts]解析报告生成提示词出错，{str(e)}")
+        raise e
+
+
+# 不添加快捷变量，避免大片“导入即报错”
+
+
+if __name__ == '__main__':
+    print(load_report_prompts())
+
+model/factory.py
+用工厂模式统一创建聊天模型和向量模型实例，最后分别生成 chat_model 和 embedding_model 供后续 RAG 流程使用
+
+"""
+
+提供模型，放在模型目录下。
+
+用“工厂模式”统一创建聊天模型和向量模型实例，最后分别生成chat_model和embedding_model供后续RAG流程使用
+
+"""
+
+from abc import ABC, abstractmethod
+from typing import Optional
+from langchain_core.embeddings import Embeddings
+from langchain_core.language_models import BaseChatModel
+from langchain_community.embeddings import DashScopeEmbeddings
+from langchain_community.chat_models.tongyi import ChatTongyi
+from utils.config_utils import rag_config
+
+
+
+class BaseModelFactory(ABC):
+    @abstractmethod
+    def generator(self) -> Optional[Embeddings | BaseChatModel]:    # 返回类型写父类
+        pass
+
+class ChatModelFactory(BaseModelFactory):
+    def generator(self) -> Optional[Embeddings | BaseChatModel]:
+        return ChatTongyi(model=rag_config["chat_model_name"])
+
+class EmbeddingsFactory(BaseModelFactory):
+    def generator(self) -> Optional[Embeddings | BaseChatModel]:
+        return DashScopeEmbeddings(model=rag_config["embedding_model_name"])
+
+chat_model = ChatModelFactory().generator()
+embedding_model = EmbeddingsFactory().generator()
+工厂模式核心思想是：
+
+把“对象怎么创建”单独封装起来，而不是在业务代码里到处直接 new / 实例化对象。
+比如不直接写：chat_model=ChatTongyi(model="qwen-turbo")，而是写：chat_model = ChatModelFactory().generator()，这样业务层只拿结果，不关心创建细节。
+rag/vector_store.py
+本质上是一个RAG知识库加载与检索服务类，把本地数据文件读取出来，切分成文本块，生成向量并存入Chroma向量数据库，然后提供检索器。
+
+"""
+
+本质上是一个向量库服务类+知识库服务类。
+负责提供检索器、知识入库，后者就是把本地数据文件读成document形式、切分文本块、转成向量存入Chroma向量数据库，同时用md5进行查重。
+
+完成3件事：
+1.初始化向量库和文本切分器
+2.提供向量库检索器
+3.知识入库
+
+"""
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from utils.config_utils import chroma_config
+from model.factory import embedding_model
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from utils.path_tool import get_abs_path
+from utils.file_utils import get_file_md5, list_files_by_suffix, pdf_loader, txt_loader
+from utils.logger_utils import logger
+import os
+
+
+class VectorStoreService:
+    def __init__(self):
+        self.vector_store = Chroma(
+            collection_name=chroma_config["collection_name"],
+            embedding_function=embedding_model,
+            persist_directory=chroma_config["persist_directory"],
+        )
+
+        self.spliter = RecursiveCharacterTextSplitter(
+            chunk_size=chroma_config["chunk_size"],
+            chunk_overlap=chroma_config["chunk_overlap"],
+            separators=chroma_config["separators"],
+            length_function=len,
+        )
+
+    def get_retriever(self):
+        return self.vector_store.as_retriever(search_kwargs={"k": chroma_config["k"]})
+
+    def ingest_documents(self):
+        """
+
+        知识入库
+        即获取本地数据文件列表、去重、把文件读成document、分片、转成向量存入向量库
+
+        """
+        # 1.准备工作
+        # 三个工具方法：查重md5、保存md5、把文件读成document格式
+        def check_md5(md5_for_check: str):
+            if not os.path.exists(get_abs_path(chroma_config["md5_store"])):
+                open(get_abs_path(chroma_config["md5_store"]), "w", encoding="utf-8").close()
+                return False
+            with open(get_abs_path(chroma_config["md5_store"]), "r", encoding="utf-8") as f:
+                for line in f.readlines():
+                    line = line.strip()
+                    if line == md5_for_check:
+                        return True
+                return False
+
+        def save_md5(md5_for_check: str):
+            with open(get_abs_path(chroma_config["md5_store"]), "a", encoding="utf-8") as f:
+                f.write(md5_for_check + "\n")
+
+        def get_file_documents(path: str):
+            if path.endswith("txt"):
+                return txt_loader(path)
+            if path.endswith("pdf"):
+                return pdf_loader(path)
+            return []
+
+        # 2.获取待处理文件列表
+        files_path: list[str] = list_files_by_suffix(
+            get_abs_path(chroma_config["data_path"]),       # data_path: data
+            tuple(chroma_config["allowed_file_type"]),
+        )
+        # 3.遍历文件
+        for path in files_path:
+            # 4.计算文件MD5并查重
+            md5 = get_file_md5(path)
+            if check_md5(md5):
+                logger.info(f"[知识入库]{path}知识库已加载过该内容，跳过")
+                continue    # 继续处理下一个文件
+            try:
+                # 5.把文件读成document格式
+                documents = get_file_documents(path)
+                # 如果没有有效内容，跳过
+                if not documents:
+                    logger.warning(f"[知识入库]{path}内无有效文本内容，跳过")
+                    continue
+                # 6.切分document
+                split_document = self.spliter.split_documents(documents)
+                # 如果切分后为空，也跳过
+                if not split_document:
+                    logger.warning(f"[知识入库]{path}分片后没有有效文本内容，跳过")
+                    continue
+                # 7.把切分后的document写入向量库
+                self.vector_store.add_documents(split_document)
+                # 8.保存文件md5值
+                save_md5(md5)
+                # 9.记录成功日志
+                logger.info(f"[知识入库]{path} 内容加载成功")
+            # 10.异常处理
+            except Exception as e:
+                logger.error(f"[知识入库]{path}加载失败：{str(e)}", exc_info=True)   # exc_info为True会会把完整堆栈打印出来
+                continue
+
+
+if __name__ == '__main__':
+    vs = VectorStoreService()                   # 创建一个向量库服务对象
+    vs.ingest_documents()                       # 知识入库
+    retriever = vs.get_retriever()              # 获取检索器
+
+    res = retriever.invoke("迷路")               # 检索相关文本
+    for r in res:
+        print(r.page_content)
+        print("-"*20)
+rag/rag_service.py
+实现了一个最基础的 RAG 问答 + 总结服务：
+
+用户先提问 → 去向量库检索相关资料 → 把“问题 + 检索到的上下文”一起交给大模型 → 输出最终回答
+"""
+
+实现最基础的RAG问答 + 总结服务，检索后按严格规则做总结，即用户提问 → 去向量库检索相关资料 → 把input和context一起交给大模型 → 输出最终总结性回答
+其中，检索向量库的方法被封装。
+
+
+是一个单轮检索总结器，后续作为智能体的一个工具函数被使用。(?)
+
+"""
+
+from langchain_core.documents import Document
+from langchain_core.output_parsers import StrOutputParser
+from rag.vector_store import VectorStoreService
+from utils.prompt_loader import load_rag_prompts
+from langchain_core.prompts import PromptTemplate
+from model.factory import chat_model
+
+
+
+class RagSummarizeService(object):
+    def __init__(self):
+        self.vector_store = VectorStoreService()
+        self.retriever = self.vector_store.get_retriever()
+        self.prompt_text = load_rag_prompts()
+        self.prompt_template = PromptTemplate.from_template(self.prompt_text)
+        self.model = chat_model
+        self.chain = self._init_chain()
+
+    def _init_chain(self):
+        chain = self.prompt_template | self.model | StrOutputParser()
+        return chain
+
+    def retrieve_documents(self, query: str) -> list[Document]:
+        """ 输入用户问题，返回检索到的文档列表 """
+        return self.retriever.invoke(query)
+
+    def answer(self, query: str) -> str:
+        # 1.接收用户问题，去向量库检索
+        documents = self.retrieve_documents(query)
+        # 2.准备一个空的context
+        context = ""
+        counter = 0
+        # 3.遍历检索到的每个文档
+        for doc in documents:
+            # 4.给每份文档编号，并拼接文档内容和元数据
+            counter += 1
+            context += f"【参考资料{counter}】: 参考资料：{doc.page_content} | 参考元数据：{doc.metadata}\n"
+        # 4.把用户问题和资料一起交给链执行
+        return self.chain.invoke({"input": query, "context": context})
+
+
+if __name__ == '__main__':
+    rag = RagSummarizeService()
+    print(rag.answer("小户型适合哪些扫地机器人"))
+agent/tools/tools.py
+定义了一组可被Agent调用的工具函数，同时提供了一套外部数据加载与查询机制。
+
+""" 定义了一组可被Agent调用的工具函数，同时提供了一套外部数据加载与查询机制 """
+
+import os
+from utils.logger_utils import logger
+from langchain_core.tools import tool
+from rag.rag_service import RagSummarizeService
+import random
+from utils.config_utils import agent_config
+from utils.path_tool import get_abs_path
+
+
+
+rag = RagSummarizeService()
+user_ids = ["1001", "1002", "1003", "1004", "1005", "1006", "1007", "1008", "1009", "1010",]
+month_array = ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06",
+             "2025-07", "2025-08", "2025-09", "2025-10", "2025-11", "2025-12", ]
+external_data = {}
+
+
+
+@tool(description="从向量库检索并总结")
+def answer(query: str) -> str:
+    return rag.answer(query)
+
+@tool(description="返回固定天气信息")
+def get_weather(city: str) -> str:
+    return f"城市{city}天气为晴天，气温26摄氏度，空气湿度50%，南风1级，AQI21，最近6小时降雨概率极低"
+
+@tool(description="随机返回用户城市")
+def get_user_location() -> str:
+    return random.choice(["深圳", "合肥", "杭州"])
+
+@tool(description="随机返回用户ID")
+def get_user_id() -> str:
+    return random.choice(user_ids)
+
+@tool(description="随机返回月份")
+def get_current_month() -> str:
+    return random.choice(month_array)
+
+def load_external_data():
+    """
+    把外部CSV风格文件的数据，一次性读入内存，并整理成便于按“用户 + 月份”查询的嵌套字典
+    目标结构：
+    {
+        "user_id": {
+            "month" : {"特征": xxx, "效率": xxx, ...}
+            "month" : {"特征": xxx, "效率": xxx, ...}
+            "month" : {"特征": xxx, "效率": xxx, ...}
+            ...
+        },
+        "user_id": {
+            "month" : {"特征": xxx, "效率": xxx, ...}
+            "month" : {"特征": xxx, "效率": xxx, ...}
+            "month" : {"特征": xxx, "效率": xxx, ...}
+            ...
+        },
+        "user_id": {
+            "month" : {"特征": xxx, "效率": xxx, ...}
+            "month" : {"特征": xxx, "效率": xxx, ...}
+            "month" : {"特征": xxx, "效率": xxx, ...}
+            ...
+        },
+        ...
+    }
+    """
+    # 1.懒加载（只有没数据的时候才去读文件，有数据就不加载了）
+    if not external_data:
+        # 2.获取external_data的路径
+        path = get_abs_path(agent_config["external_data_path"])
+        # 3.检查文件是否存在
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"外部数据文件{path}不存在")
+        # 4.跳过表头逐行读取文件
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f.readlines()[1:]:
+                # 5.按逗号拆分每行，提取字段
+                arr: list[str] = line.strip().split(",")
+
+                user_id: str = arr[0].replace('"', "")
+                feature: str = arr[1].replace('"', "")
+                efficiency: str = arr[2].replace('"', "")
+                consumables: str = arr[3].replace('"', "")
+                comparison: str = arr[4].replace('"', "")
+                month: str = arr[5].replace('"', "")
+                # 6.初始化用户字典
+                if user_id not in external_data:
+                    external_data[user_id] = {}
+                # 7.把记录字典存入嵌套用户字典
+                external_data[user_id][month] = {
+                    "特征": feature,
+                    "效率": efficiency,
+                    "耗材": consumables,
+                    "对比": comparison,
+                }
+
+@tool(description="从external records中查询某用户某月数据，如未检索到，返回空字符串")
+def fetch_external_data(user_id: str, month: str) -> str:
+    load_external_data()
+    try:
+        return external_data[user_id][month]
+    except KeyError:
+        logger.warning(f"[fetch_external_data]未能检索到用户：{user_id}在{month}的使用记录数据")
+        return ""
+
+@tool(description="无参数，无返回值，调用后触发中间件自动为报告生成的场景动态注入上下文信息，为后续提示词切换提供上下文信息")
+def fill_context_for_report():
+    return "fill_context_for_report已调用"
+agent/tools/middleware.py
+中间件，主要做三件事：
+
+监控工具调用
+在模型调用前打日志
+根据上下文动态切换 system prompt
+"""
+
+监控工具
+在模型调用前打印日志
+根据上下文动态切换prompt
+
+"""
+
+
+
+from typing import Callable
+from utils.prompt_loader import load_system_prompts, load_report_prompts
+from langchain.agents import AgentState
+from langchain.agents.middleware import wrap_tool_call, before_model, dynamic_prompt, ModelRequest
+from langchain.tools.tool_node import ToolCallRequest
+from langchain_core.messages import ToolMessage
+from langgraph.runtime import Runtime
+from langgraph.types import Command
+from utils.logger_utils import logger
+
+
+
+@wrap_tool_call
+def monitor_tool(
+        request: ToolCallRequest,                                       # 本次工具调用请求的数据包，至少封装了工具名、工具参数、运行时上下文
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],    # 真正执行工具的函数
+) -> ToolMessage | Command:         # ToolMessage：表示普通工具执行结果（大部分handler(request) 返回的都是）
+                                    # Command：表示不只是回消息，还要改状态/控流程
+    """ 监控工具调用 """
+    # 记录这次调用的工具名字和参数
+    logger.info(f"[tool monitor]执行工具：{request.tool_call['name']}")
+    logger.info(f"[tool monitor]传入参数：{request.tool_call['args']}")
+    try:# ***把request传给handler，真正把请求交给底层工具执行***
+        result = handler(request)
+        # 记录成功日志
+        logger.info(f"[tool monitor]工具{request.tool_call['name']}调用成功")
+        # 如果本次调用的是fill_context_for_report，就在运行时上下文里打一个标记“report = True”
+        # report不是框架自带的固定字段，而是这段代码运行过程中自己往上下文里加的业务标记
+        if request.tool_call['name'] == "fill_context_for_report":
+            request.runtime.context["report"] = True
+        # ***把真正工具的执行结果原样返回***
+        return result
+    except Exception as e:
+        logger.error(f"工具{request.tool_call['name']}调用失败，原因：{str(e)}")
+        raise e
+
+@before_model
+def log_before_model(
+        state: AgentState,          # 整个Agent当前状态
+        runtime: Runtime,           # 记录整个运行过程中的上下文和环境信息
+):
+    """ 在模型调用前打印日志 """
+    # 打印消息条数
+    logger.info(f"[log_before_model]即将调用模型，带有{len(state['messages'])}条消息")
+    # 打印最后一条消息的类型和内容
+    logger.debug(f"[log_before_model]{type(state['messages'][-1]).__name__} | {state['messages'][-1].content.strip()}")
+    return None
+
+@dynamic_prompt
+def report_prompt_switch(request: ModelRequest):
+    """ 模型调用前，调用此函数来动态决定这次使用的提示词 """
+    is_report = request.runtime.context.get("report", False)
+    if is_report:
+        return load_report_prompts()
+    return load_system_prompts()
+agent/react_agent.py
+封装一个基于LangChain Agent的智能体类 ReactAgent，接收用户问题后，以流式方式返回模型生成的回答
+
+"""
+
+封装一个基于LangChain Agent的智能体类ReactAgent，接收用户问题后，以流式方式返回模型生成的回答
+
+"""
+
+from langchain.agents import create_agent
+from model.factory import chat_model
+from utils.prompt_loader import load_system_prompts
+from agent.tools.tools import (answer, get_weather, get_user_location, get_user_id,
+                               get_current_month, fetch_external_data, fill_context_for_report)
+from agent.tools.middleware import monitor_tool, log_before_model, report_prompt_switch
+
+
+class ReactAgent:
+    def __init__(self):
+        self.agent = create_agent(
+            system_prompt=load_system_prompts(),
+            model=chat_model,
+            tools=[answer, get_weather, get_user_location, get_user_id,
+                   get_current_month, fetch_external_data, fill_context_for_report],
+            middleware=[monitor_tool, log_before_model, report_prompt_switch],
+        )
+
+    def stream_response(self, query: str):
+        """ 接收用户问题，把它交给Agent运行，并把Agent产生的内容流式输出 """
+        # 把用户问题封装成Agent需要的输入格式：字典
+        input_dict = {"messages": [{"role": "user", "content": query}]}
+        # 调用Agent的流式执行接口
+        for chunk in self.agent.stream(input_dict, stream_mode="values", context={"report": False}):
+            latest_message = chunk["messages"][-1]
+            if latest_message.content:
+                yield latest_message.content.strip() + "\n"
+
+
+if __name__ == '__main__':
+    agent = ReactAgent()
+    for chunk in agent.stream_response("给我生成我的使用报告"):
+        print(chunk, end="", flush=True)
